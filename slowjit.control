@@ -1,0 +1,4 @@
+comment = 'A very inefficient jit provider.'
+default_version = '1.0.0'
+module_pathname = '$libdir/slowjit'
+relocatable = true
