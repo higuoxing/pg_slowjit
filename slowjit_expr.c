@@ -60,7 +60,9 @@ static void slowjit_compile_module(SlowJitContext *jit_ctx) {
     snprintf(command, MAXPGPATH, "%s -fPIC -I%s -shared -o %s %s",
              slowjit_cc_path, include_server_path, shared_library_path,
              c_src_path);
-    system(command);
+    if (system(command) != 0) {
+      ereport(ERROR, (errmsg("failed to execute command: %s", command)));
+    }
   }
 
   {
