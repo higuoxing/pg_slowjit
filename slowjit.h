@@ -31,7 +31,14 @@ extern char *slowjit_cc_path;
 extern void _PG_init(void);
 extern void _PG_jit_provider_init(JitProviderCallbacks *cb);
 
-typedef struct SlowjitContext {
+typedef struct SlowJitHandle {
+  /* Shared library path, for error reporting. */
+  char *shared_library_path;
+  /* Handle of the shared library. */
+  void *handle;
+} SlowJitHandle;
+
+typedef struct SlowJitContext {
   JitContext base;
   StringInfoData code_holder;
   /* Is there any pending code that needs to be emitted */
@@ -40,6 +47,7 @@ typedef struct SlowjitContext {
   int counter;
 
   size_t module_generation;
+
   /* Handles of the compiled shared libraries. */
   List *handles;
 } SlowJitContext;

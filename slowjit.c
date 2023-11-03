@@ -8,7 +8,7 @@ void _PG_init(void) {
   DefineCustomStringVariable(
       "slowjit.cc_path",
       "Sets the C compiler to be used on the remote server.", NULL, &slowjit_cc_path,
-      "cc", PGC_SU_BACKEND, 0, NULL, NULL, NULL);
+      "cc", PGC_SU_BACKEND, GUC_EXPLAIN, NULL, NULL, NULL);
 }
 
 void _PG_jit_provider_init(JitProviderCallbacks *cb) {
