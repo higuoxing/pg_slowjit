@@ -1,4 +1,5 @@
 #include "slowjit.h"
+#include <dlfcn.h>
 
 static size_t slowjit_module_generation = 0;
 
@@ -57,11 +58,11 @@ static void slowjit_compile_module(SlowJitContext *jit_ctx) {
 
     /* Prepare compile command. */
     get_includeserver_path(my_exec_path, include_server_path);
-    snprintf(command, MAXPGPATH, "%s -fPIC -I%s -shared -o %s %s",
+    snprintf(command, MAXPGPATH, "%s -fPIC -I%s -shared -ggdb -g3 -O0 -o %s %s",
              slowjit_cc_path, include_server_path, shared_library_path,
              c_src_path);
     if (system(command) != 0) {
-      ereport(ERROR, (errmsg("failed to execute command: %s", command)));
+      ereport(ERROR, (errmsg("cannot execute command: %s", command)));
     }
   }
 
@@ -74,7 +75,7 @@ static void slowjit_compile_module(SlowJitContext *jit_ctx) {
     if (handle == NULL) {
       char *err = dlerror();
       ereport(ERROR,
-              (errmsg("failed to dlopen '%s': %s", shared_library_path, err)));
+              (errmsg("cannot dlopen '%s': %s", shared_library_path, err)));
     }
 
     oldcontext = MemoryContextSwitchTo(TopMemoryContext);
@@ -103,14 +104,14 @@ static ExprStateEvalFunc slowjit_get_function(SlowJitContext *jit_ctx,
     if (jitted_func == NULL) {
       /* Consume the existing error. */
       char *err = dlerror();
-      ereport(DEBUG1, (errmsg("cannot find symbol '%s': %s", funcname, err)));
+      ereport(NOTICE, (errmsg("cannot find symbol '%s': %s", funcname, err)));
       continue;
     } else {
       return jitted_func;
     }
   }
 
-  ereport(ERROR, (errmsg("failed to jit function '%s'", funcname)));
+  ereport(ERROR, (errmsg("cannot jit function '%s'", funcname)));
 
   return NULL;
 }
@@ -132,15 +133,6 @@ static Datum slowjit_exec_compiled_expr(ExprState *state, ExprContext *econtext,
 }
 
 bool slowjit_compile_expr(ExprState *state) {
-
-#define emit_line(...)                                                         \
-  do {                                                                         \
-    appendStringInfo(&jit_ctx->code_holder, __VA_ARGS__);                      \
-    appendStringInfoChar(&jit_ctx->code_holder, '\n');                         \
-  } while (0)
-
-#define emit_include(header) emit_line("#include \"%s\"", header)
-
   PlanState *parent = state->parent;
   SlowJitContext *jit_ctx = NULL;
   char *funcname = NULL;
@@ -155,6 +147,14 @@ bool slowjit_compile_expr(ExprState *state) {
     jit_ctx = slowjit_create_context(parent->state->es_jit_flags);
     parent->state->es_jit = &jit_ctx->base;
   }
+
+#define emit_line(...)                                                         \
+  do {                                                                         \
+    appendStringInfo(&jit_ctx->code_holder, __VA_ARGS__);                      \
+    appendStringInfoChar(&jit_ctx->code_holder, '\n');                         \
+  } while (0)
+
+#define emit_include(header) emit_line("#include \"%s\"", header)
 
   /* The code holder is empty, which means this is a new module. */
   if (jit_ctx->code_holder.len == 0) {
@@ -174,6 +174,8 @@ bool slowjit_compile_expr(ExprState *state) {
 
   /* Emit some commonly used variables. */
   emit_line("  TupleTableSlot *resultslot = state->resultslot;");
+#include <assert.h>
+  assert(state->steps_len != 0);
 
   for (int opno = 0; opno < state->steps_len; ++opno) {
     ExprEvalStep *op;
@@ -184,8 +186,9 @@ bool slowjit_compile_expr(ExprState *state) {
 
     switch (opcode) {
     case EEOP_DONE: {
-      emit_line("  // EEOP_DONE");
-      emit_line("  *isnull = state->resnull;");
+      emit_line("  { // EEOP_DONE");
+      emit_line("    *isnull = state->resnull;");
+      emit_line("  }");
       emit_line("  return state->resvalue;");
 
       /* Close function boday. */
@@ -204,13 +207,22 @@ bool slowjit_compile_expr(ExprState *state) {
       emit_line("  { // EEOP_CONST");
       emit_line("    bool *resnull = (bool *) %lu;", (uint64_t)op->resnull);
       emit_line("    Datum *resvalue = (Datum *) %lu;", (uint64_t)op->resvalue);
-      emit_line("    *resnull = %d;", op->d.constval.isnull);
-      emit_line("    *resvalue = %lu;", op->d.constval.value);
+      emit_line("    *resnull = (bool) %d;", op->d.constval.isnull);
+      emit_line("    *resvalue = (Datum) %lu;", op->d.constval.value);
       emit_line("  }");
       break;
     }
     default: {
-      ereport(NOTICE, (errmsg("operator: %d is not implemented!", opcode)));
+      /*
+       * Though we cannot jit this function, we still need to close the emitted function!
+       */
+      emit_line("  { // OPERATOR (%d) is not implemented!", opcode);
+      emit_line("    *isnull = state->resnull;");
+      emit_line("  }");
+      emit_line("  return state->resvalue;");
+
+      /* Close function boday. */
+      emit_line("}");
       return false;
     }
     }
@@ -230,7 +242,17 @@ bool slowjit_compile_expr(ExprState *state) {
   return true;
 }
 
-void slowjit_release_context(JitContext *jit_ctx) { /* TODO */
+void slowjit_release_context(JitContext *jit_ctx) {
+  SlowJitContext *ctx = (SlowJitContext *)jit_ctx;
+  ListCell *lc;
+
+  foreach (lc, ctx->handles) {
+    void *handle = (void *)lfirst(lc);
+    dlclose(handle);
+  }
+
+  list_free(ctx->handles);
+  ctx->handles = NIL;
 }
 
 void slowjit_reset_after_error(void) { /* TODO */
