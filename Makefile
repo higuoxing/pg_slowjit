@@ -1,7 +1,7 @@
 MODULE_big = slowjit
 EXTENSION = slowjit
 
-OBJS = slowjit.o slowjit_expr.o
+OBJS = slowjit.o
 
 # Disable the bitcode generation.
 override with_llvm = no
