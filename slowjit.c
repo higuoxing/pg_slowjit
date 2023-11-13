@@ -24,6 +24,8 @@
 
 PG_MODULE_MAGIC;
 
+static int module_generation = 0;
+
 extern void _PG_jit_provider_init(JitProviderCallbacks *cb);
 
 typedef struct SlowJitHandle {
@@ -35,8 +37,6 @@ typedef struct SlowJitHandle {
 
 typedef struct SlowJitContext {
   JitContext base;
-  /* Number of shared libraries emitted. */
-  int module_generation;
   /* Handles of the compiled shared libraries. */
   List *handles;
 } SlowJitContext;
@@ -59,7 +59,6 @@ static bool slowjit_compile_expr(ExprState *state) {
     jit_ctx = (SlowJitContext *)MemoryContextAllocZero(TopMemoryContext,
                                                        sizeof(SlowJitContext));
     jit_ctx->base.flags = parent->state->es_jit_flags;
-    jit_ctx->handles = NIL;
 
     /* ensure cleanup */
     jit_ctx->base.resowner = CurrentResourceOwner;
@@ -83,7 +82,7 @@ static bool slowjit_compile_expr(ExprState *state) {
 
   /* Emit the jitted function signature. */
   snprintf(symbol_name, MAXPGPATH, "slowjit_eval_expr_%d_%d", MyProcPid,
-           jit_ctx->module_generation);
+           module_generation);
   emit_line("Datum %s(ExprState *state, ExprContext *econtext, bool *isnull)",
             symbol_name);
 
@@ -112,10 +111,10 @@ static bool slowjit_compile_expr(ExprState *state) {
       break;
     }
     case EEOP_ASSIGN_TMP: {
+      int resultnum = op->d.assign_tmp.resultnum;
       emit_line("  { // EEOP_ASSIGN_TMP");
-      emit_line("    int resultnum = %d;", op->d.assign_tmp.resultnum);
-      emit_line("    resultslot->tts_values[resultnum] = state->resvalue;");
-      emit_line("    resultslot->tts_isnull[resultnum] = state->resnull;");
+      emit_line("    resultslot->tts_values[%d] = state->resvalue;", resultnum);
+      emit_line("    resultslot->tts_isnull[%d] = state->resnull;", resultnum);
       emit_line("  }");
       break;
     }
@@ -124,12 +123,13 @@ static bool slowjit_compile_expr(ExprState *state) {
       emit_line("    bool *resnull = (bool *) %lu;", (uint64_t)op->resnull);
       emit_line("    Datum *resvalue = (Datum *) %lu;", (uint64_t)op->resvalue);
       emit_line("    *resnull = (bool) %d;", op->d.constval.isnull);
-      emit_line("    *resvalue = (Datum) %lu;", op->d.constval.value);
+      emit_line("    *resvalue = (Datum) %luull;", op->d.constval.value);
       emit_line("  }");
       break;
     }
     default: {
       resetStringInfo(&code_holder);
+      pfree(code_holder.data);
       return false;
     }
     }
@@ -147,7 +147,7 @@ static bool slowjit_compile_expr(ExprState *state) {
 
     /* Write the emitted C codes to a file. */
     snprintf(c_src_path, MAXPGPATH, "/tmp/%d.%d.c", MyProcPid,
-             jit_ctx->module_generation);
+             module_generation);
     c_src_file = fopen(c_src_path, "w+");
     if (c_src_file == NULL) {
       ereport(ERROR, (errmsg("cannot open file '%s' for write", c_src_path)));
@@ -155,10 +155,11 @@ static bool slowjit_compile_expr(ExprState *state) {
     fwrite(code_holder.data, 1, code_holder.len, c_src_file);
     fclose(c_src_file);
     resetStringInfo(&code_holder);
+    pfree(code_holder.data);
 
     /* Prepare the compile command. */
     snprintf(shared_library_path, MAXPGPATH, "/tmp/%d.%d.so", MyProcPid,
-             jit_ctx->module_generation);
+             module_generation);
     get_includeserver_path(my_exec_path, include_server_path);
     snprintf(compile_command, MAXPGPATH,
              "cc -fPIC -I%s -shared -O0 -ggdb -g3 -o %s %s",
@@ -191,7 +192,7 @@ static bool slowjit_compile_expr(ExprState *state) {
 
     state->evalfunc = jitted_func;
     state->evalfunc_private = NULL;
-    jit_ctx->module_generation++;
+    module_generation++;
   }
 
   return true;
@@ -212,7 +213,7 @@ static void slowjit_release_context(JitContext *ctx) {
 static void slowjit_reset_after_error(void) {}
 
 void _PG_jit_provider_init(JitProviderCallbacks *cb) {
-  cb->reset_after_error = slowjit_reset_after_error;
-  cb->release_context = slowjit_release_context;
   cb->compile_expr = slowjit_compile_expr;
+  cb->release_context = slowjit_release_context;
+  cb->reset_after_error = slowjit_reset_after_error;
 }
