@@ -1,39 +1,31 @@
 #include "postgres.h"
 
+#include "c.h"
 #include "executor/execExpr.h"
-#include "executor/tuptable.h"
 #include "fmgr.h"
 #include "jit/jit.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "nodes/execnodes.h"
 #include "nodes/pg_list.h"
-#include "port.h"
-#include "portability/instr_time.h"
-#include "storage/ipc.h"
-#include "utils/expandeddatum.h"
-#include "utils/guc.h"
+#include "pg_config_manual.h"
+#include "utils/elog.h"
 #include "utils/memutils.h"
 #include "utils/palloc.h"
 #include "utils/resowner.h"
 #include "utils/resowner_private.h"
 
 #include <dlfcn.h>
-#include <fcntl.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 PG_MODULE_MAGIC;
 
 static int module_generation = 0;
 
 extern void _PG_jit_provider_init(JitProviderCallbacks *cb);
-
-typedef struct SlowJitHandle {
-  /* Shared library path, for error reporting. */
-  char *shared_library_path;
-  /* Handle of the shared library. */
-  void *handle;
-} SlowJitHandle;
 
 typedef struct SlowJitContext {
   JitContext base;
@@ -162,7 +154,7 @@ static bool slowjit_compile_expr(ExprState *state) {
              module_generation);
     get_includeserver_path(my_exec_path, include_server_path);
     snprintf(compile_command, MAXPGPATH,
-             "cc -fPIC -I%s -shared -O0 -ggdb -g3 -o %s %s",
+             "cc -fPIC -I%s -shared -O3 -o %s %s",
              include_server_path, shared_library_path, c_src_path);
 
     /* Compile the codes */
